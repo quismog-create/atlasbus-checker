@@ -22,7 +22,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DATABASE_URL       = os.getenv("DATABASE_URL", "")
-CHECK_INTERVAL     = 60
+CHECK_INTERVAL     = 120
 SUBS_FILE          = Path("subscriptions.json")  # fallback если нет БД
 
 ATLAS_API  = "https://atlasbus.by/api/search"
@@ -80,7 +80,7 @@ notified: dict[tuple, int] = {}
 
 # Кеш рейсов: (from_id, to_id, date_str) → {"rides": [...], "ts": float}
 rides_cache: dict[tuple, dict] = {}
-CACHE_TTL = 55  # секунд — не делаем повторный запрос если данные свежее этого
+CACHE_TTL = 115  # секунд — не делаем повторный запрос если данные свежее этого
 
 # Глобальный пул БД
 db_pool: asyncpg.Pool | None = None
