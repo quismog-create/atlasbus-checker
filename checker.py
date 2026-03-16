@@ -28,12 +28,17 @@ SUBS_FILE          = Path("subscriptions.json")  # fallback если нет БД
 ATLAS_API = "https://atlasbus.by/api/search"
 ATLAS_HEADERS = {
     "accept": "application/json, text/plain, */*",
+    "accept-language": "ru-RU,ru;q=0.9,en;q=0.8",
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
     "x-application-source": "web, web",
     "x-application-version": "2.45.5",
     "x-project-identifier": "morda",
     "x-saas-partner-id": "atlas",
     "referer": "https://atlasbus.by/",
+    "origin": "https://atlasbus.by",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
 }
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -222,14 +227,28 @@ async def fetch_rides_raw(session: aiohttp.ClientSession, from_id: str, to_id: s
     }
     timeout = aiohttp.ClientTimeout(total=15)
     log.info("fetch: %s→%s %s", from_id, to_id, date_str)
-    async with session.get(ATLAS_API, params=params, headers=ATLAS_HEADERS, timeout=timeout) as r:
-        r.raise_for_status()
-        data = await r.json(content_type=None)
-    rides = data.get("rides", [])
-    rides.sort(key=lambda x: x.get("departure", ""))
-    rides_cache[key] = {"rides": rides, "ts": _time.monotonic()}
-    log.info("fetch result: %d rides", len(rides))
-    return rides
+
+    for attempt in range(3):
+        if attempt > 0:
+            wait = 5 * attempt
+            log.info("retry %d after %ds...", attempt, wait)
+            await asyncio.sleep(wait)
+        try:
+            async with session.get(ATLAS_API, params=params, headers=ATLAS_HEADERS, timeout=timeout) as r:
+                if r.status == 429:
+                    log.warning("429 на попытке %d", attempt + 1)
+                    continue
+                r.raise_for_status()
+                data = await r.json(content_type=None)
+                rides = data.get("rides", [])
+                rides.sort(key=lambda x: x.get("departure", ""))
+                rides_cache[key] = {"rides": rides, "ts": _time.monotonic()}
+                log.info("fetch result: %d rides", len(rides))
+                return rides
+        except asyncio.TimeoutError:
+            log.warning("timeout на попытке %d", attempt + 1)
+
+    raise Exception("Сервис временно недоступен, попробуйте через минуту")
 
 def get_cached_ride(from_id: str, to_id: str, date_str: str, idx: int) -> dict | None:
     cached = rides_cache.get((from_id, to_id, date_str))
@@ -651,7 +670,16 @@ async def main():
     subs = await db_load_subs()
     log.info("Загружено подписок: %d", sum(len(v) for v in subs.values()))
 
-    async with aiohttp.ClientSession() as session:
+    # Создаём сессию с cookie jar чтобы сайт не считал нас ботом
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.CookieJar()) as session:
+        # Получаем cookies с главной страницы
+        try:
+            async with session.get("https://atlasbus.by/", headers=ATLAS_HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                log.info("Главная страница: %d, cookies: %d", r.status, len(session.cookie_jar))
+        except Exception as e:
+            log.warning("Не удалось получить cookies: %s", e)
+
         me = await tg(session, "getMe")
         if not me.get("ok"):
             log.error("Неверный токен: %s", me)
