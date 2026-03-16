@@ -13,6 +13,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 import aiohttp
+import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,8 +21,9 @@ load_dotenv()
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+DATABASE_URL       = os.getenv("DATABASE_URL", "")
 CHECK_INTERVAL     = 60
-SUBS_FILE          = Path("subscriptions.json")
+SUBS_FILE          = Path("subscriptions.json")  # fallback если нет БД
 
 ATLAS_API = "https://atlasbus.by/api/search"
 ATLAS_HEADERS = {
@@ -74,22 +76,105 @@ notified: dict[tuple, int] = {}
 rides_cache: dict[tuple, dict] = {}
 CACHE_TTL = 55  # секунд — не делаем повторный запрос если данные свежее этого
 
+# Глобальный пул БД
+db_pool: asyncpg.Pool | None = None
+
 
 # ── PERSISTENCE ────────────────────────────────────────────────────────────────
 
-def load_subs() -> Subscriptions:
+async def init_db() -> bool:
+    global db_pool
+    if not DATABASE_URL:
+        return False
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    chat_id   TEXT NOT NULL,
+                    ride_id   TEXT NOT NULL,
+                    from_id   TEXT NOT NULL,
+                    to_id     TEXT NOT NULL,
+                    date      TEXT NOT NULL,
+                    from_name TEXT NOT NULL,
+                    to_name   TEXT NOT NULL,
+                    departure TEXT NOT NULL,
+                    PRIMARY KEY (chat_id, ride_id)
+                )
+            """)
+        log.info("БД подключена (PostgreSQL)")
+        return True
+    except Exception as e:
+        log.error("init_db: %s", e)
+        return False
+
+async def db_load_subs() -> Subscriptions:
+    if not db_pool:
+        return _file_load_subs()
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM subscriptions")
+        subs: Subscriptions = {}
+        for r in rows:
+            cid = r["chat_id"]
+            if cid not in subs:
+                subs[cid] = []
+            subs[cid].append(Watch(
+                ride_id=r["ride_id"], from_id=r["from_id"], to_id=r["to_id"],
+                date=r["date"], from_name=r["from_name"], to_name=r["to_name"],
+                departure=r["departure"],
+            ))
+        return subs
+    except Exception as e:
+        log.error("db_load_subs: %s", e)
+        return {}
+
+async def db_add_watch(chat_id: str, watch: Watch) -> None:
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO subscriptions (chat_id, ride_id, from_id, to_id, date, from_name, to_name, departure)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT DO NOTHING
+        """, chat_id, watch.ride_id, watch.from_id, watch.to_id,
+             watch.date, watch.from_name, watch.to_name, watch.departure)
+
+async def db_remove_watch(chat_id: str, ride_id: str) -> None:
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM subscriptions WHERE chat_id=$1 AND ride_id=$2", chat_id, ride_id)
+
+async def db_remove_by_route(chat_id: str, from_id: str, to_id: str, date_str: str) -> None:
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM subscriptions WHERE chat_id=$1 AND from_id=$2 AND to_id=$3 AND date=$4",
+            chat_id, from_id, to_id, date_str,
+        )
+
+# ── FILE PERSISTENCE FALLBACK ──────────────────────────────────────────────────
+
+def _file_load_subs() -> Subscriptions:
     if not SUBS_FILE.exists():
         return {}
     try:
         raw = json.loads(SUBS_FILE.read_text())
         return {cid: [Watch(**w) for w in watches] for cid, watches in raw.items()}
     except Exception as e:
-        log.error("load_subs: %s", e)
+        log.error("file load_subs: %s", e)
         return {}
 
-def save_subs(subs: Subscriptions) -> None:
+def _file_save_subs(subs: Subscriptions) -> None:
     data = {cid: [asdict(w) for w in watches] for cid, watches in subs.items()}
     SUBS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+def save_subs(subs: Subscriptions) -> None:
+    """Файловый fallback — используется только если нет БД."""
+    if not db_pool:
+        _file_save_subs(subs)
 
 
 # ── TELEGRAM ───────────────────────────────────────────────────────────────────
@@ -438,6 +523,7 @@ async def handle_callback(session, cb, subs: Subscriptions):
             subs[cid_str] = []
         if not any(w.ride_id == ride["id"] for w in subs[cid_str]):
             subs[cid_str].append(watch)
+            await db_add_watch(cid_str, watch)
             save_subs(subs)
             log.info("Sub added: chat=%s ride=%s", chat_id, ride["id"])
 
@@ -465,14 +551,15 @@ async def handle_callback(session, cb, subs: Subscriptions):
             before  = len(subs.get(cid_str, []))
             subs[cid_str] = [w for w in subs.get(cid_str, []) if w.ride_id != ride_id]
             if len(subs[cid_str]) < before:
+                await db_remove_watch(cid_str, ride_id)
                 save_subs(subs)
                 notified.pop((cid_str, ride_id), None)
-        # Если unsub пришёл из экрана подписок — ride_id неизвестен, удалим по дате+маршруту
         else:
             subs[cid_str] = [
                 w for w in subs.get(cid_str, [])
                 if not (w.from_id == from_id and w.to_id == to_id and w.date == date_str)
             ]
+            await db_remove_by_route(cid_str, from_id, to_id, date_str)
             save_subs(subs)
         await screen_subs(session, chat_id, mid, subs)
 
@@ -560,7 +647,8 @@ async def main():
         log.error("TELEGRAM_BOT_TOKEN не задан. Все env vars: %s", list(os.environ.keys()))
         return
 
-    subs = load_subs()
+    await init_db()
+    subs = await db_load_subs()
     log.info("Загружено подписок: %d", sum(len(v) for v in subs.values()))
 
     async with aiohttp.ClientSession() as session:
