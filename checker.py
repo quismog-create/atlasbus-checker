@@ -25,7 +25,8 @@ DATABASE_URL       = os.getenv("DATABASE_URL", "")
 CHECK_INTERVAL     = 60
 SUBS_FILE          = Path("subscriptions.json")  # fallback если нет БД
 
-ATLAS_API = "https://atlasbus.by/api/search"
+ATLAS_API  = "https://atlasbus.by/api/search"
+PROXY_URL  = os.getenv("PROXY_URL", "")  # http://user:pass@host:port
 ATLAS_HEADERS = {
     "accept": "application/json, text/plain, */*",
     "accept-language": "ru-RU,ru;q=0.9,en;q=0.8",
@@ -234,7 +235,7 @@ async def fetch_rides_raw(session: aiohttp.ClientSession, from_id: str, to_id: s
             log.info("retry %d after %ds...", attempt, wait)
             await asyncio.sleep(wait)
         try:
-            async with session.get(ATLAS_API, params=params, headers=ATLAS_HEADERS, timeout=timeout) as r:
+            async with session.get(ATLAS_API, params=params, headers=ATLAS_HEADERS, timeout=timeout, proxy=PROXY_URL or None) as r:
                 if r.status == 429:
                     log.warning("429 на попытке %d", attempt + 1)
                     continue
@@ -675,7 +676,7 @@ async def main():
     async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.CookieJar()) as session:
         # Получаем cookies с главной страницы
         try:
-            async with session.get("https://atlasbus.by/", headers=ATLAS_HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            async with session.get("https://atlasbus.by/", headers=ATLAS_HEADERS, timeout=aiohttp.ClientTimeout(total=10), proxy=PROXY_URL or None) as r:
                 log.info("Главная страница: %d, cookies: %d", r.status, len(session.cookie_jar))
         except Exception as e:
             log.warning("Не удалось получить cookies: %s", e)
