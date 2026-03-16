@@ -589,6 +589,8 @@ async def handle_callback(session, cb, subs: Subscriptions):
 # ── CHECKER LOOP ───────────────────────────────────────────────────────────────
 
 async def check_all(session: aiohttp.ClientSession, subs: Subscriptions) -> None:
+    total = sum(len(v) for v in subs.values())
+    log.info("--- проверка %d подписок(и) ---", total)
     for cid_str, watches in list(subs.items()):
         for watch in watches:
             try:
@@ -606,6 +608,7 @@ async def check_all(session: aiohttp.ClientSession, subs: Subscriptions) -> None
             free   = ride.get("freeSeats", 0)
             key    = (cid_str, watch.ride_id)
 
+            log.info("  [%s] %s→%s %s: %d мест", cid_str, watch.from_name, watch.to_name, watch.departure[:16], free)
             if free > 0 and ride.get("status") == "sale":
                 if notified.get(key, 0) == 0:
                     dep = datetime.fromisoformat(ride["departure"])
