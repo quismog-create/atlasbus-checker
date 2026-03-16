@@ -695,9 +695,8 @@ async def main():
 
         async def checker():
             while True:
-                if subs:
-                    await check_all(session, subs)
                 await asyncio.sleep(CHECK_INTERVAL)
+                await check_all(session, subs)
 
         await asyncio.gather(poll_updates(session, subs), checker())
 
