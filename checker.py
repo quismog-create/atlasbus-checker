@@ -204,7 +204,9 @@ async def edit(session, chat_id, message_id, text, keyboard=None, parse_mode="HT
         kw["reply_markup"] = {"inline_keyboard": keyboard}
     res = await tg(session, "editMessageText", **kw)
     if not res.get("ok"):
-        log.error("editMessageText: %s", res)
+        desc = res.get("description", "")
+        if "message is not modified" not in desc:
+            log.error("editMessageText: %s", res)
 
 async def answer_cb(session, cb_id, text=""):
     await tg(session, "answerCallbackQuery", callback_query_id=cb_id, text=text)
@@ -670,6 +672,7 @@ async def main():
     await init_db()
     subs = await db_load_subs()
     log.info("Загружено подписок: %d", sum(len(v) for v in subs.values()))
+    log.info("Прокси: %s", PROXY_URL if PROXY_URL else "не задан")
 
     # Создаём сессию с cookie jar чтобы сайт не считал нас ботом
     connector = aiohttp.TCPConnector(ssl=False)
