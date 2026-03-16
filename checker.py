@@ -557,7 +557,7 @@ async def poll_updates(session: aiohttp.ClientSession, subs: Subscriptions) -> N
 
 async def main():
     if not TELEGRAM_BOT_TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN не задан в .env")
+        log.error("TELEGRAM_BOT_TOKEN не задан. Все env vars: %s", list(os.environ.keys()))
         return
 
     subs = load_subs()
