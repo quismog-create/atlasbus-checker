@@ -590,25 +590,39 @@ async def handle_callback(session, cb, subs: Subscriptions):
 
 async def check_all(session: aiohttp.ClientSession, subs: Subscriptions) -> None:
     total = sum(len(v) for v in subs.values())
+    if not total:
+        return
     log.info("--- проверка %d подписок(и) ---", total)
+
+    # Группируем все подписки по уникальному маршруту — один запрос на маршрут
+    route_map: dict[tuple, list[tuple[str, Watch]]] = {}
     for cid_str, watches in list(subs.items()):
         for watch in watches:
-            try:
-                rides = await fetch_rides_raw(session, watch.from_id, watch.to_id, watch.date, force=True)
-            except Exception as e:
-                log.warning("check error [%s]: %s", cid_str, e)
-                await asyncio.sleep(10)  # подождать при 429
-                continue
-            await asyncio.sleep(3)  # пауза между запросами разных подписок
+            key = (watch.from_id, watch.to_id, watch.date)
+            route_map.setdefault(key, []).append((cid_str, watch))
 
+    for i, ((from_id, to_id, date_str), entries) in enumerate(route_map.items()):
+        if i > 0:
+            await asyncio.sleep(5)  # пауза между разными маршрутами
+
+        try:
+            rides = await fetch_rides_raw(session, from_id, to_id, date_str, force=True)
+        except Exception as e:
+            log.warning("check error %s→%s %s: %s", from_id, to_id, date_str, e)
+            await asyncio.sleep(15)
+            continue
+
+        # Один запрос — проверяем всех подписчиков на этот маршрут
+        for cid_str, watch in entries:
             ride = next((r for r in rides if r["id"] == watch.ride_id), None)
             if not ride:
                 continue
 
-            free   = ride.get("freeSeats", 0)
-            key    = (cid_str, watch.ride_id)
+            free = ride.get("freeSeats", 0)
+            key  = (cid_str, watch.ride_id)
 
             log.info("  [%s] %s→%s %s: %d мест", cid_str, watch.from_name, watch.to_name, watch.departure[:16], free)
+
             if free > 0 and ride.get("status") == "sale":
                 if notified.get(key, 0) == 0:
                     dep = datetime.fromisoformat(ride["departure"])
